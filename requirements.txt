@@ -1,0 +1,5 @@
+awscli==1.23.7
+boto3==1.22.5
+pytest==7.1.2
+pytest-cov==3.0.0
+flake8==4.0.1

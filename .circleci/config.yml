@@ -1,0 +1,190 @@
+version: 2.1
+orbs:
+  python: circleci/python@1.5.0
+  aws-ecr: circleci/aws-ecr@8.1.2
+  aws-cli: circleci/aws-cli@3.1.1
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          key: python-requirements-V1-{{ checksum "requirements.txt" }}
+      - python/install-packages:
+          pkg-manager: pip
+      - run:
+          name: Run tests
+          command: python -m pytest
+      - save_cache:
+          key: python-requirements-V1-{{ checksum "requirements.txt" }}
+          paths:
+            - "~/.cache/pip"
+            - "/usr/local/lib/python3.8/site-packages"
+            - "/usr/local/lib/site-python"
+      - persist_to_workspace: # does it make sense to have this?
+          root: ~/project
+          paths:
+            - .
+  lint-and-coverage:
+    docker:
+      - image: cimg/python:3.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          key: python-requirements-V1-{{ checksum "requirements.txt" }}
+      - python/install-packages:
+          pkg-manager: pip
+      - run: 
+          name: Linter
+          command: |
+            flake8 src/
+            flake8 tests/
+      - run:
+          name: Coverage
+          command: |
+            python -m pytest --cov=src --cov-report=html
+      - store_artifacts:
+          path: htmlcov
+          destination: coverage-report
+      - persist_to_workspace: # does it make sense to have this?
+          root: ~/project
+          paths:
+            - .
+  build-and-push:
+    parallelism: 1
+    docker:
+      - image: cimg/base:stable
+    parameters:
+      ecr_repo_name:
+        type: string
+      ecr_image_tags:
+        type: string
+        default: latest
+    steps:
+      - checkout
+      - setup_remote_docker
+      - aws-ecr/build-and-push-image:
+          create-repo: false
+          dockerfile: Dockerfile
+          no-output-timeout: 20m
+          path: .
+          profile-name: default
+          repo: <<parameters.ecr_repo_name>>
+          skip-when-tags-exist: false
+          tag: <<parameters.ecr_image_tags>>
+      # Teardown
+      # Save artifacts
+      - store_artifacts:
+          path: .
+  deploy:
+    parallelism: 1
+    docker:
+      - image: cimg/python:3.8.0
+    parameters:
+      ecr_repo_name:
+        type: string
+      ecr_image_tags:
+        type: string
+        default: latest
+    steps:
+      - setup_remote_docker
+      - aws-cli/setup
+      - run:
+          name: Update lambda image
+          command: |
+            aws lambda update-function-code \
+              --function-name template-lambda-function \
+              --image-uri ${AWS_ECR_ACCOUNT_URL}:latest
+  retag-old-images:
+    working_directory: ~/bx
+    parallelism: 1
+    docker:
+      - image: brokerxbot/build:ruby2.6
+    parameters:
+      ecr_repo_name:
+        type: string
+      ecr_image_tags:
+        type: string
+        default: latest
+    environment:
+      ecr_repo_name: <<parameters.ecr_repo_name>>
+      ecr_image_tags: <<parameters.ecr_image_tags>>
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run: chmod +x /bx/bin/retag-ecr-images.sh # grant execute permission
+      - run:
+          name: Retag old ECR images
+          command: /bx/bin/retag-ecr-images.sh
+
+production-filters: &production-filters
+  branches:
+    ignore: /.*/
+  tags:
+    only: /^release-\d+\.\d+\.\d+/
+
+staging-filters: &staging-filters
+  branches:
+    only: main
+  tags:
+    ignore: /^.*/
+
+# TODO: create seperate resources for production and staging (non-production)
+workflows:
+  version: 2.1
+  production-workflow:
+    jobs:
+      # TODO: get rid of test and lint-and-coverage jobs from production workflow
+      - test:
+          filters: *production-filters
+      - lint-and-coverage:
+          filters: *production-filters
+      - build-and-push:
+          requires:
+            - test
+            - lint-and-coverage
+          context: personal-aws-account
+          ecr_repo_name: template-lambda
+          ecr_image_tags: latest,production,ci-<< pipeline.number >>,<< pipeline.git.tag >>,<<pipeline.git.revision >>
+          filters: *production-filters
+      - deploy:
+          requires:
+            - build-and-push
+          context: personal-aws-account
+          ecr_repo_name: template-lambda
+          ecr_image_tags: latest,production,ci-<< pipeline.number >>,<< pipeline.git.tag >>,<<pipeline.git.revision >>
+          filters: *production-filters
+      - retag-old-images:
+          requires:
+            - deploy
+          ecr_repo_name: template-lambda
+          ecr_image_tags: latest,production,ci-<< pipeline.number >>,<< pipeline.git.tag >>,<<pipeline.git.revision >>
+          filters: *production-filters
+  staging-workflow:
+    jobs:
+      - test:
+          filters: *staging-filters
+      - lint-and-coverage:
+          filters: *staging-filters
+      - build-and-push:
+          requires:
+            - test
+            - lint-and-coverage
+          context: personal-aws-account
+          ecr_repo_name: template-lambda
+          ecr_image_tags: latest,staging,ci-<< pipeline.number >>,<<pipeline.git.revision >>
+          filters: *staging-filters
+      - deploy:
+          requires:
+            - build-and-push
+          context: personal-aws-account
+          ecr_repo_name: template-lambda
+          ecr_image_tags: latest,staging,ci-<< pipeline.number >>,<<pipeline.git.revision >>
+          filters: *staging-filters
+      - retag-old-images:
+          requires:
+            - deploy
+          ecr_repo_name: template-lambda
+          ecr_image_tags: latest,staging,ci-<< pipeline.number >>,<<pipeline.git.revision >>
+          filters: *staging-filters
