@@ -1,4 +1,4 @@
-# Template Lambdas Function
+# Template Lambda Function
 
 ## Notes
     Why use the AWS Lambda Base Image?
@@ -63,7 +63,7 @@ docker push <ecr-uri>:<tag-name>
 
 ### Rollback Deployment
 
-- Add the "iamge tag" you want to roll back to. 
+- Add the "image tag" you want to roll back to. 
 ```
 aws lambda update-function-code --function-name <function-name> --image-uri <ecr-uri>:<image-tag>
 ```
